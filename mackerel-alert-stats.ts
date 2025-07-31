@@ -41,17 +41,21 @@ type AlertStats = {
 
 const prev = new Date(2*from.valueOf()-to.valueOf())
 
+const windowMin = Math.round((to.valueOf() - from.valueOf())/60000)
+
 const [alertsByMonitor, prevAlertsByMonitor] = await getAlertsByMonitor(prev, from, to)
 
 console.log(`table:${from.toLocaleString()} ~ ${to.toLocaleString()}の集計 (前期間: ${prev.toLocaleString()} ~ ${from.toLocaleString()})`)
-console.log("\t監視名\t回数\tMTTR(分)\t合計(分)")
+console.log("\t監視名\t回数\tMTTR(分)\t稼働率(%)")
 
 for (const [monitorId, alerts] of Object.entries(alertsByMonitor)) {
   // チェック監視はAPIから名前を取れないので除外している
   if (alerts![0].type == "check") continue
   const monitorName = (await cli.monitors.get(monitorId)).name
   const [currentStats, prevStats] = [getAlertStats(alerts as Alert[]), getAlertStats(prevAlertsByMonitor[monitorId] ?? [])]
-  console.log(`\t${monitorName}\t${getNumberWithDelta(currentStats.count, prevStats.count)}\t${getNumberWithDelta(currentStats.mttr, prevStats.mttr)}\t${getNumberWithDelta(currentStats.downTime, prevStats.downTime)}`);
+  const [availability, prevAvailability] = [100 * (windowMin - currentStats.downTime)/windowMin, 100 * (windowMin - prevStats.downTime)/windowMin]
+
+  console.log(`\t${monitorName}\t${getNumberWithDelta(currentStats.count, prevStats.count)}\t${getNumberWithDelta(currentStats.mttr, prevStats.mttr)}\t${getNumberWithDelta(availability, prevAvailability, 2)}`);
 }
 
 function getMTTR(alerts: Alert[]): number {
@@ -87,8 +91,8 @@ async function getAlertsByMonitor(prev: Date, from: Date, to: Date): Promise<Par
   ]
 }
 
-function getNumberWithDelta(a: number, b: number): string {
-  return  `${a}(${a >= b ? "+" : ""}${a - b})`
+function getNumberWithDelta(a: number, b: number, fractionDigits: number = 0): string {
+  return  `${a.toFixed(fractionDigits)}(${a >= b ? "+" : ""}${(a - b).toFixed(fractionDigits)})`
 }
 
 function getAlertStats(alerts: Alert[]): AlertStats {
