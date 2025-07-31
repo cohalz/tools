@@ -49,8 +49,12 @@ console.log(`table:${from.toLocaleString()} ~ ${to.toLocaleString()}の集計 (�
 console.log("\t監視名\t回数\tMTTR(分)\t稼働率(%)")
 
 for (const [monitorId, alerts] of Object.entries(alertsByMonitor)) {
+
+
   // チェック監視はAPIから名前を取れないので除外している
-  if (alerts![0].type == "check") continue
+  if (alerts![0].type === "check") continue
+  // 削除済みの監視はAPIから名前を取れないので除外している
+  if (alerts![0].monitorId === null) continue
   const monitorName = (await cli.monitors.get(monitorId)).name
   const [currentStats, prevStats] = [getAlertStats(alerts as Alert[]), getAlertStats(prevAlertsByMonitor[monitorId] ?? [])]
   const [availability, prevAvailability] = [100 * (windowMin - currentStats.downTime)/windowMin, 100 * (windowMin - prevStats.downTime)/windowMin]
