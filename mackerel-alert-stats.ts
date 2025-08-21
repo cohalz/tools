@@ -75,13 +75,13 @@ async function getAlerts(from: Date) {
   let currentOpenedAt = new Date();
   while (true) {
     const res = await cli.alerts.list({ includeClosed: true, cursor })
-    alerts = alerts.concat(res.alerts);
-    if (currentOpenedAt >= from) {
-      break;
-    }
     cursor = res.cursor;
     currentOpenedAt = res.alerts[res.alerts.length-1].openedAt
-    await delay(1000);
+    alerts = alerts.concat(res.alerts);
+    if (currentOpenedAt < from) {
+      break;
+    }
+    await delay(100);
   }
   return alerts;
 }
