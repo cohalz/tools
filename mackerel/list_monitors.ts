@@ -139,10 +139,14 @@ async function main() {
   }
 
   try {
-    console.log("Mackerel監視ルールを取得中...");
+    if (format !== "json") {
+      console.log("Mackerel監視ルールを取得中...");
+    }
     let monitors = await getMonitors(apiKey);
 
-    console.log(`サービス "${serviceFilter}" でフィルタリング中...`);
+    if (format !== "json") {
+      console.log(`サービス "${serviceFilter}" でフィルタリング中...`);
+    }
     monitors = filterByService(monitors, serviceFilter, excludeAllServices);
 
     if (format === "json") {
