@@ -5,6 +5,8 @@
  *
  * 使い方:
  *   MACKEREL_APIKEY=your-api-key deno run --allow-net --allow-env list_monitors.ts --service myservice [--format json] [--excludeAllServices]
+ *   複数のサービスを指定する場合はカンマ区切りで指定:
+ *   MACKEREL_APIKEY=your-api-key deno run --allow-net --allow-env list_monitors.ts --service service1,service2,service3
  */
 
 interface Monitor {
@@ -41,6 +43,9 @@ async function getMonitors(apiKey: string): Promise<Monitor[]> {
 }
 
 function filterByService(monitors: Monitor[], service: string, excludeAllServices: boolean = false): Monitor[] {
+  // カンマ区切りでサービス名を分割
+  const services = service.split(",").map(s => s.trim());
+
   return monitors.filter((monitor) => {
     // type が external, expression, anomalyDetection, service の場合は名前にserviceが含まれているかチェック
     if (
@@ -49,14 +54,14 @@ function filterByService(monitors: Monitor[], service: string, excludeAllService
       monitor.type === "anomalyDetection" ||
       monitor.type === "service"
     ) {
-      return monitor.name.includes(service);
+      return services.some(svc => monitor.name.includes(svc));
     }
 
     // excludeScopesにサービスが含まれている場合は除外
     if (monitor.excludeScopes && monitor.excludeScopes.length > 0) {
       const isExcluded = monitor.excludeScopes.some((scope) => {
         const servicePart = scope.split(":")[0];
-        return servicePart === service;
+        return services.includes(servicePart);
       });
       if (isExcluded) {
         return false;
@@ -76,7 +81,7 @@ function filterByService(monitors: Monitor[], service: string, excludeAllService
     // scopesの各要素について、コロンの前の部分がserviceと一致するかチェック
     return monitor.scopes.some((scope) => {
       const servicePart = scope.split(":")[0];
-      return servicePart === service;
+      return services.includes(servicePart);
     });
   });
 }
@@ -109,6 +114,9 @@ async function main() {
     console.error(
       "  MACKEREL_APIKEY=your-api-key deno run --allow-net --allow-env list_monitors.ts --service myservice [--format json] [--excludeAllServices]",
     );
+    console.error(
+      "  複数サービス指定: --service service1,service2,service3",
+    );
     Deno.exit(1);
   }
 
@@ -134,6 +142,9 @@ async function main() {
     console.error("\n使い方:");
     console.error(
       "  MACKEREL_APIKEY=your-api-key deno run --allow-net --allow-env list_monitors.ts --service myservice [--format json] [--excludeAllServices]",
+    );
+    console.error(
+      "  複数サービス指定: --service service1,service2,service3",
     );
     Deno.exit(1);
   }
