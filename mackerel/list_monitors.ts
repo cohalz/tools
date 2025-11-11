@@ -4,8 +4,7 @@
  * Mackerel 監視ルール一覧取得CLI
  *
  * 使い方:
- *   MACKEREL_APIKEY=your-api-key deno run --allow-net --allow-env list_monitors.ts --service myservice
- *   MACKEREL_APIKEY=your-api-key deno run --allow-net --allow-env list_monitors.ts --service myservice --format json
+ *   MACKEREL_APIKEY=your-api-key deno run --allow-net --allow-env list_monitors.ts --service myservice [--format json] [--excludeAllServices]
  */
 
 interface Monitor {
@@ -41,7 +40,7 @@ async function getMonitors(apiKey: string): Promise<Monitor[]> {
   return data.monitors;
 }
 
-function filterByService(monitors: Monitor[], service: string): Monitor[] {
+function filterByService(monitors: Monitor[], service: string, excludeAllServices: boolean = false): Monitor[] {
   return monitors.filter((monitor) => {
     // type が external, expression, anomalyDetection, service の場合は名前にserviceが含まれているかチェック
     if (
@@ -62,6 +61,11 @@ function filterByService(monitors: Monitor[], service: string): Monitor[] {
       if (isExcluded) {
         return false;
       }
+    }
+
+    // excludeAllServicesが有効な場合、scopesが未定義または空配列の場合は除外
+    if (excludeAllServices && (!monitor.scopes || monitor.scopes.length === 0)) {
+      return false;
     }
 
     // scopesが未定義または空配列の場合は含める
@@ -103,10 +107,7 @@ async function main() {
     console.error("Error: MACKEREL_APIKEY environment variable is not set");
     console.error("\n使い方:");
     console.error(
-      "  MACKEREL_APIKEY=your-api-key deno run --allow-net --allow-env list_monitors.ts --service myservice",
-    );
-    console.error(
-      "  MACKEREL_APIKEY=your-api-key deno run --allow-net --allow-env list_monitors.ts --service myservice --format json",
+      "  MACKEREL_APIKEY=your-api-key deno run --allow-net --allow-env list_monitors.ts --service myservice [--format json] [--excludeAllServices]",
     );
     Deno.exit(1);
   }
@@ -114,6 +115,7 @@ async function main() {
   // コマンドライン引数の解析
   let serviceFilter: string | null = null;
   let format: string = "text";
+  let excludeAllServices: boolean = false;
   const args = Deno.args;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--service" && i + 1 < args.length) {
@@ -122,6 +124,8 @@ async function main() {
     } else if (args[i] === "--format" && i + 1 < args.length) {
       format = args[i + 1];
       i++;
+    } else if (args[i] === "--excludeAllServices") {
+      excludeAllServices = true;
     }
   }
 
@@ -129,10 +133,7 @@ async function main() {
     console.error("Error: --service オプションは必須です");
     console.error("\n使い方:");
     console.error(
-      "  MACKEREL_APIKEY=your-api-key deno run --allow-net --allow-env list_monitors.ts --service myservice",
-    );
-    console.error(
-      "  MACKEREL_APIKEY=your-api-key deno run --allow-net --allow-env list_monitors.ts --service myservice --format json",
+      "  MACKEREL_APIKEY=your-api-key deno run --allow-net --allow-env list_monitors.ts --service myservice [--format json] [--excludeAllServices]",
     );
     Deno.exit(1);
   }
@@ -142,7 +143,7 @@ async function main() {
     let monitors = await getMonitors(apiKey);
 
     console.log(`サービス "${serviceFilter}" でフィルタリング中...`);
-    monitors = filterByService(monitors, serviceFilter);
+    monitors = filterByService(monitors, serviceFilter, excludeAllServices);
 
     if (format === "json") {
       console.log(JSON.stringify(monitors, null, 2));
