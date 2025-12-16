@@ -3,14 +3,16 @@
 /**
  * Mackerel の期間中のアラート履歴を集計しScrapboxのテーブル形式で出力するスクリプト.
  * 実行例:
- *   MACKEREL_APIKEY=*** ./mackerel-alert-stats.ts --from $(date -d "2 week ago" +%Y-%m-%dT%H:%M:%S+0900) --to $(date +%Y-%m-%dT%H:%M:%S+0900)
+ *   MACKEREL_APIKEY=*** ./mackerel-alert-stats.ts --from $(date -d "2 week ago" +%Y-%m-%dT%H:%M:%S+0900) --to $(date +%Y-%m-%dT%H:%M:%S+0900) [--notificationGroupId <id>]
  * @module
  */
 
 import { parseArgs } from 'jsr:@std/cli@^0.224.0/parse-args';
 import { delay } from 'jsr:@std/async@^0.224.0';
- import { MackerelClient } from 'jsr:@susisu/mackerel-client@^0.1.1';
+import { MackerelClient } from 'jsr:@susisu/mackerel-client@^0.1.1';
 import type { Alert } from 'jsr:@susisu/mackerel-client@^0.1.1/alerts';
+import type { NotificationGroup } from 'jsr:@susisu/mackerel-client@^0.1.1/channels';
+
 
 const apiKey = Deno.env.get('MACKEREL_APIKEY');
 if (apiKey === undefined) {
@@ -19,7 +21,7 @@ if (apiKey === undefined) {
 const cli = new MackerelClient(apiKey);
 
 const flags = parseArgs(Deno.args, {
-  string: ['from', 'to'],
+  string: ['from', 'to', 'notificationGroupId'],
 });
 const from = new Date(flags.from ?? '');
 const to = new Date(flags.to ?? '');
@@ -43,6 +45,12 @@ const prev = new Date(2*from.valueOf()-to.valueOf())
 
 const windowMin = Math.round((to.valueOf() - from.valueOf())/60000)
 
+// 通知グループでフィルタリングするための情報を取得
+let notificationGroup: NotificationGroup | null = null;
+if (flags.notificationGroupId) {
+  notificationGroup = await getNotificationGroup(flags.notificationGroupId);
+}
+
 const [alertsByMonitor, prevAlertsByMonitor] = await getAlertsByMonitor(prev, from, to)
 
 console.log(`table:${from.toLocaleString()} ~ ${to.toLocaleString()}の集計 (前期間: ${prev.toLocaleString()} ~ ${from.toLocaleString()})`)
@@ -55,7 +63,47 @@ for (const [monitorId, alerts] of Object.entries(alertsByMonitor)) {
   if (alerts![0].type === "check") continue
   // 削除済みの監視はAPIから名前を取れないので除外している
   if (alerts![0].monitorId === null) continue
-  const monitorName = (await cli.monitors.get(monitorId)).name
+
+  const monitor = await cli.monitors.get(monitorId);
+
+  // 通知グループでフィルタリング
+  if (notificationGroup) {
+    const allowedMonitorIds = new Set(notificationGroup.scopes.monitors.map(m => m.id));
+    const allowedServiceNames = new Set(notificationGroup.scopes.services.map(s => s.name));
+
+    // 監視ルールIDが通知グループに含まれているかチェック
+    let isAllowed = allowedMonitorIds.has(monitorId);
+
+    // 監視ルールのスコープがサービスに一致するかチェック
+    if (!isAllowed && 'serviceName' in monitor && monitor.serviceName) {
+
+      if (allowedServiceNames.has(monitor.serviceName)) {
+          isAllowed = true;
+        }
+    }
+    if (!isAllowed && 'scopes' in monitor) {
+      if(Array.isArray(monitor.scopes)) {
+        for (const scope of monitor.scopes) {
+          const serviceName = scope.split(':')[0];
+          if (allowedServiceNames.has(serviceName)) {
+            isAllowed = true;
+            break;
+          }
+        }
+      } else if (Array.isArray(monitor.scopes.include)) {
+        for (const scope of monitor.scopes.include) {
+          const serviceName = scope.split(':')[0];
+          if (allowedServiceNames.has(serviceName)) {
+            isAllowed = true;
+            break;
+          }
+        }
+      }
+    }
+    if (!isAllowed) continue;
+  }
+
+  const monitorName = monitor.name;
   const [currentStats, prevStats] = [getAlertStats(alerts as Alert[]), getAlertStats(prevAlertsByMonitor[monitorId] ?? [])]
   const [availability, prevAvailability] = [100 * (windowMin - currentStats.downTime)/windowMin, 100 * (windowMin - prevStats.downTime)/windowMin]
 
@@ -106,4 +154,13 @@ function getAlertStats(alerts: Alert[]): AlertStats {
     mttr,
     downTime: count * mttr
   }
+}
+
+async function getNotificationGroup(notificationGroupId: string): Promise<NotificationGroup> {
+  const notificationGroups = await cli.channels.listNotificationGroups();
+  const group = notificationGroups.find(ng => ng.id === notificationGroupId);
+  if (!group) {
+    throw new Error(`Notification group with id ${notificationGroupId} not found`);
+  }
+  return group;
 }
