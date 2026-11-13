@@ -3,7 +3,9 @@
 /**
  * Mackerel の期間中のアラート履歴を集計しScrapboxのテーブル形式で出力するスクリプト.
  * 実行例:
- *   MACKEREL_APIKEY=*** ./mackerel-alert-stats.ts --from $(date -d "2 week ago" +%Y-%m-%dT%H:%M:%S+0900) --to $(date +%Y-%m-%dT%H:%M:%S+0900) [--notificationGroupId <id>]
+ *   MACKEREL_APIKEY=*** ./mackerel-alert-stats.ts --from $(date -d "2 week ago" +%Y-%m-%dT%H:%M:%S+0900) --to $(date +%Y-%m-%dT%H:%M:%S+0900) [--notificationGroupId <id> | --channelId <id>]
+ * --notificationGroupId: その通知グループに届くアラートのみに絞る (子通知グループとして転送してくる親の通知グループの分も含む)
+ * --channelId: その通知チャンネルに届くアラートのみに絞る (デフォルト通知グループ経由の分は含まない)
  * @module
  */
 
@@ -21,8 +23,11 @@ if (apiKey === undefined) {
 const cli = new MackerelClient(apiKey);
 
 const flags = parseArgs(Deno.args, {
-  string: ['from', 'to', 'notificationGroupId'],
+  string: ['from', 'to', 'notificationGroupId', 'channelId'],
 });
+if (flags.notificationGroupId && flags.channelId) {
+  throw new Error('--notificationGroupId and --channelId cannot be specified together');
+}
 const from = new Date(flags.from ?? '');
 const to = new Date(flags.to ?? '');
 if (Number.isNaN(from.getTime())) {
@@ -45,10 +50,18 @@ const prev = new Date(2*from.valueOf()-to.valueOf())
 
 const windowMin = Math.round((to.valueOf() - from.valueOf())/60000)
 
-// 通知グループでフィルタリングするための情報を取得
-let notificationGroup: NotificationGroup | null = null;
-if (flags.notificationGroupId) {
-  notificationGroup = await getNotificationGroup(flags.notificationGroupId);
+type NotificationScope = {
+  monitorIds: Set<string>;
+  serviceNames: Set<string>;
+};
+
+// 通知グループ・通知チャンネルでフィルタリングするための情報を取得
+let notificationScope: NotificationScope | null = null;
+if (flags.notificationGroupId || flags.channelId) {
+  notificationScope = await getNotificationScope({
+    notificationGroupId: flags.notificationGroupId,
+    channelId: flags.channelId,
+  });
 }
 
 const [alertsByMonitor, prevAlertsByMonitor] = await getAlertsByMonitor(prev, from, to)
@@ -66,42 +79,7 @@ for (const [monitorId, alerts] of Object.entries(alertsByMonitor)) {
 
   const monitor = await cli.monitors.get(monitorId);
 
-  // 通知グループでフィルタリング
-  if (notificationGroup) {
-    const allowedMonitorIds = new Set(notificationGroup.scopes.monitors.map(m => m.id));
-    const allowedServiceNames = new Set(notificationGroup.scopes.services.map(s => s.name));
-
-    // 監視ルールIDが通知グループに含まれているかチェック
-    let isAllowed = allowedMonitorIds.has(monitorId);
-
-    // 監視ルールのスコープがサービスに一致するかチェック
-    if (!isAllowed && 'serviceName' in monitor && monitor.serviceName) {
-
-      if (allowedServiceNames.has(monitor.serviceName)) {
-          isAllowed = true;
-        }
-    }
-    if (!isAllowed && 'scopes' in monitor) {
-      if(Array.isArray(monitor.scopes)) {
-        for (const scope of monitor.scopes) {
-          const serviceName = scope.split(':')[0];
-          if (allowedServiceNames.has(serviceName)) {
-            isAllowed = true;
-            break;
-          }
-        }
-      } else if (Array.isArray(monitor.scopes.include)) {
-        for (const scope of monitor.scopes.include) {
-          const serviceName = scope.split(':')[0];
-          if (allowedServiceNames.has(serviceName)) {
-            isAllowed = true;
-            break;
-          }
-        }
-      }
-    }
-    if (!isAllowed) continue;
-  }
+  if (notificationScope && !isMonitorInScope(monitorId, monitor, notificationScope)) continue;
 
   const monitorName = monitor.name;
   const [currentStats, prevStats] = [getAlertStats(alerts as Alert[]), getAlertStats(prevAlertsByMonitor[monitorId] ?? [])]
@@ -156,11 +134,67 @@ function getAlertStats(alerts: Alert[]): AlertStats {
   }
 }
 
-async function getNotificationGroup(notificationGroupId: string): Promise<NotificationGroup> {
-  const notificationGroups = await cli.channels.listNotificationGroups();
-  const group = notificationGroups.find(ng => ng.id === notificationGroupId);
-  if (!group) {
-    throw new Error(`Notification group with id ${notificationGroupId} not found`);
+type Monitor = Awaited<ReturnType<typeof cli.monitors.get>>;
+
+function isMonitorInScope(monitorId: string, monitor: Monitor, scope: NotificationScope): boolean {
+  if (scope.monitorIds.has(monitorId)) return true;
+
+  if ('serviceName' in monitor && monitor.serviceName && scope.serviceNames.has(monitor.serviceName)) {
+    return true;
   }
-  return group;
+  if ('scopes' in monitor) {
+    const monitorScopes = Array.isArray(monitor.scopes) ? monitor.scopes : monitor.scopes.include;
+    if (Array.isArray(monitorScopes)) {
+      return monitorScopes.some(s => scope.serviceNames.has(s.split(':')[0]));
+    }
+  }
+  return false;
+}
+
+// 子通知グループは親の通知グループに来た通知の転送先なので、起点の通知グループに加えて祖先の通知グループのスコープも対象にする
+async function getNotificationScope(
+  { notificationGroupId, channelId }: { notificationGroupId?: string; channelId?: string },
+): Promise<NotificationScope> {
+  const notificationGroups = await cli.channels.listNotificationGroups();
+
+  let startGroups: NotificationGroup[];
+  if (notificationGroupId) {
+    startGroups = notificationGroups.filter(ng => ng.id === notificationGroupId);
+    if (startGroups.length === 0) {
+      throw new Error(`Notification group with id ${notificationGroupId} not found`);
+    }
+  } else {
+    startGroups = notificationGroups.filter(ng => ng.childChannelIds.includes(channelId!));
+    if (startGroups.length === 0) {
+      throw new Error(`No notification group notifies channel ${channelId}`);
+    }
+  }
+
+  const parentsById = new Map<string, NotificationGroup[]>();
+  for (const group of notificationGroups) {
+    for (const childId of group.childNotificationGroupIds) {
+      parentsById.set(childId, [...(parentsById.get(childId) ?? []), group]);
+    }
+  }
+
+  const visited = new Map<string, NotificationGroup>();
+  const queue = [...startGroups];
+  while (queue.length > 0) {
+    const group = queue.shift()!;
+    if (visited.has(group.id)) continue;
+    visited.set(group.id, group);
+    queue.push(...(parentsById.get(group.id) ?? []));
+  }
+
+  const groups = [...visited.values()];
+  console.error(`対象の通知グループ: ${groups.map(g => g.name).join(', ')}`);
+  const criticalGroups = groups.filter(g => g.notificationLevel === 'critical');
+  if (criticalGroups.length > 0) {
+    console.error(`注意: Critical のみ通知する通知グループ (${criticalGroups.map(g => g.name).join(', ')}) を経由するアラートは、Warning も集計に含まれます`);
+  }
+
+  return {
+    monitorIds: new Set(groups.flatMap(g => g.scopes.monitors.map(m => m.id))),
+    serviceNames: new Set(groups.flatMap(g => g.scopes.services.map(s => s.name))),
+  };
 }
